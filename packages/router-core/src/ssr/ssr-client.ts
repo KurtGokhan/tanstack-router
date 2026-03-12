@@ -2,6 +2,7 @@ import invariant from 'tiny-invariant'
 import { batch } from '../utils/batch'
 import { isNotFound } from '../not-found'
 import { createControlledPromise } from '../utils'
+import { hydrateSsrMatchId } from './ssr-match-id'
 import type { GLOBAL_SEROVAL, GLOBAL_TSR } from './constants'
 import type { DehydratedMatch, TsrSsrGlobal } from './types'
 import type { AnyRouteMatch } from '../Matches'
@@ -27,6 +28,14 @@ function hydrateMatch(
   match.ssr = deyhydratedMatch.ssr
   match.updatedAt = deyhydratedMatch.u
   match.error = deyhydratedMatch.e
+  // Only hydrate global-not-found when a defined value is present in the
+  // dehydrated payload. If omitted, preserve the value computed from the
+  // current client location (important for SPA fallback HTML served at unknown
+  // URLs, where dehydrated matches may come from `/` but client matching marks
+  // root as globalNotFound).
+  if (deyhydratedMatch.g !== undefined) {
+    match.globalNotFound = deyhydratedMatch.g
+  }
 }
 
 export async function hydrate(router: AnyRouter): Promise<any> {
@@ -54,7 +63,16 @@ export async function hydrate(router: AnyRouter): Promise<any> {
     'Expected to find a dehydrated data on window.$_TSR.router, but we did not. Please file an issue!',
   )
 
-  const { manifest, dehydratedData, lastMatchId } = window.$_TSR.router
+  const dehydratedRouter = window.$_TSR.router
+  dehydratedRouter.matches.forEach((dehydratedMatch) => {
+    dehydratedMatch.i = hydrateSsrMatchId(dehydratedMatch.i)
+  })
+  if (dehydratedRouter.lastMatchId) {
+    dehydratedRouter.lastMatchId = hydrateSsrMatchId(
+      dehydratedRouter.lastMatchId,
+    )
+  }
+  const { manifest, dehydratedData, lastMatchId } = dehydratedRouter
 
   router.ssr = {
     manifest,
@@ -72,10 +90,9 @@ export async function hydrate(router: AnyRouter): Promise<any> {
 
   // kick off loading the route chunks
   const routeChunkPromise = Promise.all(
-    matches.map((match) => {
-      const route = router.looseRoutesById[match.routeId]!
-      return router.loadRouteChunk(route)
-    }),
+    matches.map((match) =>
+      router.loadRouteChunk(router.looseRoutesById[match.routeId]!),
+    ),
   )
 
   function setMatchForcePending(match: AnyRouteMatch) {
@@ -113,7 +130,7 @@ export async function hydrate(router: AnyRouter): Promise<any> {
   // First step is to reyhdrate loaderData and __beforeLoadContext
   let firstNonSsrMatchIndex: number | undefined = undefined
   matches.forEach((match) => {
-    const dehydratedMatch = window.$_TSR!.router!.matches.find(
+    const dehydratedMatch = dehydratedRouter.matches.find(
       (d) => d.i === match.id,
     )
     if (!dehydratedMatch) {
@@ -136,12 +153,10 @@ export async function hydrate(router: AnyRouter): Promise<any> {
     }
   })
 
-  router.__store.setState((s) => {
-    return {
-      ...s,
-      matches,
-    }
-  })
+  router.__store.setState((s) => ({
+    ...s,
+    matches,
+  }))
 
   // Allow the user to handle custom hydration data
   await router.options.hydrate?.(dehydratedData)
@@ -267,13 +282,11 @@ export async function hydrate(router: AnyRouter): Promise<any> {
           }))
         }
         // hide the pending component once the load is finished
-        router.updateMatch(match.id, (prev) => {
-          return {
-            ...prev,
-            _displayPending: undefined,
-            displayPendingPromise: undefined,
-          }
-        })
+        router.updateMatch(match.id, (prev) => ({
+          ...prev,
+          _displayPending: undefined,
+          displayPendingPromise: undefined,
+        }))
       })
     })
   }

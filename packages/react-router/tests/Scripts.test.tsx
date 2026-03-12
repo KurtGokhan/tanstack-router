@@ -124,6 +124,113 @@ describe('ssr scripts', () => {
   })
 })
 
+describe('scripts with async/defer attributes', () => {
+  test('server renders scripts with async/defer attributes in output', async () => {
+    const rootRoute = createRootRoute({
+      scripts: () => [
+        {
+          src: 'script.js',
+          async: true,
+        },
+        {
+          src: 'script2.js',
+          defer: true,
+        },
+      ],
+      component: () => {
+        return (
+          <div>
+            <div data-testid="server-root">root</div>
+            <Outlet />
+            <Scripts />
+          </div>
+        )
+      },
+    })
+
+    const indexRoute = createRoute({
+      path: '/',
+      getParentRoute: () => rootRoute,
+      component: () => {
+        return <div data-testid="server-index">index</div>
+      },
+    })
+
+    const router = createRouter({
+      history: createMemoryHistory({
+        initialEntries: ['/'],
+      }),
+      routeTree: rootRoute.addChildren([indexRoute]),
+      isServer: true,
+    })
+
+    await router.load()
+
+    // Use ReactDOMServer.renderToString to test actual server output
+    const html = ReactDOMServer.renderToString(
+      <RouterProvider router={router} />,
+    )
+
+    expect(html).toMatch(/<script[^>]*src="script\.js"[^>]*async=""/)
+    expect(html).toMatch(/<script[^>]*src="script2\.js"[^>]*defer=""/)
+  })
+
+  test('client renders scripts with attributes (including async/defer)', async () => {
+    const rootRoute = createRootRoute({
+      scripts: () => [
+        {
+          src: 'script.js',
+          async: true,
+          crossOrigin: 'anonymous',
+        },
+      ],
+      component: () => {
+        return (
+          <div>
+            <div data-testid="async-root">root</div>
+            <Outlet />
+            <Scripts />
+          </div>
+        )
+      },
+    })
+
+    const indexRoute = createRoute({
+      path: '/',
+      getParentRoute: () => rootRoute,
+      component: () => {
+        return <div data-testid="async-index">index</div>
+      },
+    })
+
+    // Clear head and any leftover body scripts between tests.
+    document.head.innerHTML = ''
+    document.querySelectorAll('body script').forEach((s) => s.remove())
+
+    const router = createRouter({
+      history: createMemoryHistory({
+        initialEntries: ['/'],
+      }),
+      routeTree: rootRoute.addChildren([indexRoute]),
+      isServer: false, // Client-side rendering
+    })
+
+    await router.load()
+
+    await act(() => render(<RouterProvider router={router} />))
+
+    expect(await screen.findByTestId('async-root')).toBeInTheDocument()
+
+    const script = document.querySelector('script[src="script.js"]')
+    expect(script).toBeTruthy()
+
+    // Attributes are preserved on the client.
+    expect(script?.getAttribute('src')).toBe('script.js')
+    expect(script?.hasAttribute('async')).toBe(true)
+    expect(script?.getAttribute('crossorigin')).toBe('anonymous')
+  })
+})
+
 describe('ssr HeadContent', () => {
   test('derives title, dedupes meta, and allows non-loader HeadContent', async () => {
     const rootRoute = createRootRoute({
@@ -324,7 +431,7 @@ describe('data script rendering', () => {
     expect(scriptEl!.innerHTML).toBe(jsonLd)
   })
 
-  test('executable script still renders empty on client', async () => {
+  test('executable script is injected into document.head via useEffect on client', async () => {
     const rootRoute = createRootRoute({
       scripts: () => [
         {
@@ -363,14 +470,16 @@ describe('data script rendering', () => {
     const rootEl = container.querySelector('[data-testid="exec-root"]')
     expect(rootEl).not.toBeNull()
 
-    const scripts = container.querySelectorAll('script:not([type])')
-    const inlineScript = Array.from(scripts).find((s) => !s.hasAttribute('src'))
-    expect(inlineScript).not.toBeNull()
-    // Executable scripts should render empty (content applied via useEffect)
-    expect(inlineScript!.innerHTML).toBe('')
+    // Executable inline scripts are injected into document.head via useEffect,
+    // not rendered in the React tree on the client.
+    const headScript = document.head.querySelector(
+      'script:not([type]):not([src])',
+    )
+    expect(headScript).not.toBeNull()
+    expect(headScript!.textContent).toBe('console.log("hello")')
   })
 
-  test('module script still renders empty on client', async () => {
+  test('module script is injected into document.head via useEffect on client', async () => {
     const rootRoute = createRootRoute({
       scripts: () => [
         {
@@ -410,10 +519,11 @@ describe('data script rendering', () => {
     const rootEl = container.querySelector('[data-testid="module-root"]')
     expect(rootEl).not.toBeNull()
 
-    const moduleScript = container.querySelector('script[type="module"]')
+    // Module scripts are injected into document.head via useEffect,
+    // not rendered in the React tree on the client.
+    const moduleScript = document.head.querySelector('script[type="module"]')
     expect(moduleScript).not.toBeNull()
-    // Module scripts should render empty (content applied via useEffect)
-    expect(moduleScript!.innerHTML).toBe('')
+    expect(moduleScript!.textContent).toBe('import { foo } from "./foo.js"')
   })
 
   test('application/json data script preserves content', async () => {
@@ -523,7 +633,7 @@ describe('data script rendering', () => {
     expect(containerScripts[0]!.innerHTML).toBe(jsonLd)
   })
 
-  test('empty string type is treated as executable, not data script', async () => {
+  test('empty string type is treated as executable, injected via useEffect on client', async () => {
     const rootRoute = createRootRoute({
       scripts: () => [
         {
@@ -563,9 +673,10 @@ describe('data script rendering', () => {
     const rootEl = container.querySelector('[data-testid="empty-type-root"]')
     expect(rootEl).not.toBeNull()
 
-    const scriptEl = container.querySelector('script[type=""]')
+    // Empty type = text/javascript per HTML spec. Executable scripts are
+    // injected into document.head via useEffect on the client.
+    const scriptEl = document.head.querySelector('script[type=""]')
     expect(scriptEl).not.toBeNull()
-    // Empty type = text/javascript per HTML spec, should render empty like executable scripts
-    expect(scriptEl!.innerHTML).toBe('')
+    expect(scriptEl!.textContent).toBe('console.log("empty type")')
   })
 })
