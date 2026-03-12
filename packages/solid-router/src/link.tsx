@@ -22,7 +22,6 @@ import { useHydrated } from './ClientOnly'
 import type {
   AnyRouter,
   Constrain,
-  LinkCurrentTargetElement,
   LinkOptions,
   RegisteredRouter,
   RoutePaths,
@@ -31,6 +30,8 @@ import type {
   ValidateLinkOptions,
   ValidateLinkOptionsArray,
 } from './typePrimitives'
+
+const timeoutMap = new WeakMap<EventTarget, ReturnType<typeof setTimeout>>()
 
 export function useLinkProps<
   TRouter extends AnyRouter = RegisteredRouter,
@@ -73,6 +74,7 @@ export function useLinkProps<
       'style',
       'class',
       'onClick',
+      'onBlur',
       'onFocus',
       'onMouseEnter',
       'onMouseLeave',
@@ -125,8 +127,15 @@ export function useLinkProps<
     select: (s) => s.location,
   })
 
-  const currentSearch = useRouterState({
-    select: (s) => s.location.searchStr,
+  const buildLocationKey = useRouterState({
+    select: (s) => {
+      const leaf = s.matches[s.matches.length - 1]
+      return {
+        search: leaf?.search,
+        hash: s.location.hash,
+        path: leaf?.pathname, // path + params
+      }
+    },
   })
 
   const from = options.from
@@ -139,7 +148,7 @@ export function useLinkProps<
   }
 
   const next = Solid.createMemo(() => {
-    currentSearch()
+    buildLocationKey()
     return router.buildLocation(_options() as any)
   })
 
@@ -167,7 +176,7 @@ export function useLinkProps<
     const _href = hrefOption()
     if (_href?.external) {
       // Block dangerous protocols for external links
-      if (isDangerousProtocol(_href.href)) {
+      if (isDangerousProtocol(_href.href, router.protocolAllowlist)) {
         if (process.env.NODE_ENV !== 'production') {
           console.warn(`Blocked Link with dangerous protocol: ${_href.href}`)
         }
@@ -183,8 +192,8 @@ export function useLinkProps<
     if (isSafeInternal) return undefined
     try {
       new URL(to as any)
-      // Block dangerous protocols like javascript:, data:, vbscript:
-      if (isDangerousProtocol(to as string)) {
+      // Block dangerous protocols like javascript:, blob:, data:
+      if (isDangerousProtocol(to as string, router.protocolAllowlist)) {
         if (process.env.NODE_ENV !== 'production') {
           console.warn(`Blocked Link with dangerous protocol: ${to}`)
         }
@@ -297,6 +306,7 @@ export function useLinkProps<
         'style',
         'class',
         'onClick',
+        'onBlur',
         'onFocus',
         'onMouseEnter',
         'onMouseLeave',
@@ -346,39 +356,40 @@ export function useLinkProps<
     }
   }
 
-  // The click handler
-  const handleFocus = (_: MouseEvent) => {
-    if (local.disabled) return
-    if (preload()) {
+  const enqueueIntentPreload = (e: MouseEvent | FocusEvent) => {
+    if (local.disabled || preload() !== 'intent') return
+
+    if (!preloadDelay()) {
       doPreload()
+      return
     }
-  }
 
-  const handleTouchStart = handleFocus
+    const eventTarget = e.currentTarget || e.target
 
-  const handleEnter = (e: MouseEvent) => {
-    if (local.disabled) return
-    const eventTarget = (e.currentTarget || {}) as LinkCurrentTargetElement
+    if (!eventTarget || timeoutMap.has(eventTarget)) return
 
-    if (preload()) {
-      if (eventTarget.preloadTimeout) {
-        return
-      }
-
-      eventTarget.preloadTimeout = setTimeout(() => {
-        eventTarget.preloadTimeout = null
+    timeoutMap.set(
+      eventTarget,
+      setTimeout(() => {
+        timeoutMap.delete(eventTarget)
         doPreload()
-      }, preloadDelay())
-    }
+      }, preloadDelay()),
+    )
   }
 
-  const handleLeave = (e: MouseEvent) => {
-    if (local.disabled) return
-    const eventTarget = (e.currentTarget || {}) as LinkCurrentTargetElement
+  const handleTouchStart = (_: TouchEvent) => {
+    if (local.disabled || preload() !== 'intent') return
+    doPreload()
+  }
 
-    if (eventTarget.preloadTimeout) {
-      clearTimeout(eventTarget.preloadTimeout)
-      eventTarget.preloadTimeout = null
+  const handleLeave = (e: MouseEvent | FocusEvent) => {
+    if (local.disabled) return
+    const eventTarget = e.currentTarget || e.target
+
+    if (eventTarget) {
+      const id = timeoutMap.get(eventTarget)
+      clearTimeout(id)
+      timeoutMap.delete(eventTarget)
     }
   }
 
@@ -441,9 +452,16 @@ export function useLinkProps<
         href: hrefOption()?.href,
         ref: mergeRefs(setRef, _options().ref),
         onClick: composeEventHandlers([local.onClick, handleClick]),
-        onFocus: composeEventHandlers([local.onFocus, handleFocus]),
-        onMouseEnter: composeEventHandlers([local.onMouseEnter, handleEnter]),
-        onMouseOver: composeEventHandlers([local.onMouseOver, handleEnter]),
+        onBlur: composeEventHandlers([local.onBlur, handleLeave]),
+        onFocus: composeEventHandlers([local.onFocus, enqueueIntentPreload]),
+        onMouseEnter: composeEventHandlers([
+          local.onMouseEnter,
+          enqueueIntentPreload,
+        ]),
+        onMouseOver: composeEventHandlers([
+          local.onMouseOver,
+          enqueueIntentPreload,
+        ]),
         onMouseLeave: composeEventHandlers([local.onMouseLeave, handleLeave]),
         onMouseOut: composeEventHandlers([local.onMouseOut, handleLeave]),
         onTouchStart: composeEventHandlers([
